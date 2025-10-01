@@ -1,4 +1,4 @@
-// sidebar.js — active tab (current window), Live→Synced badge, yellow flash, Origin above Core URL
+// sidebar.js — no flicker when tracking is off; restrained flashing; focus-change guarded
 
 const fields = {
   tabTitle: document.getElementById("tabTitle"),
@@ -16,35 +16,46 @@ const fields = {
   // metadata (origin first)
   coreOrigin: document.getElementById("coreOrigin"),
   coreUrl: document.getElementById("coreUrl"),
-  coreCount: document.getElementById("coreCount"),
+  coreCount: document.getElementById("coreCount"), // if present
   canonUrl: document.getElementById("canonUrl"),
   canonCount: document.getElementById("canonCount"),
   ogUrl: document.getElementById("ogUrl"),
   ogCount: document.getElementById("ogCount"),
   jsonId: document.getElementById("jsonId"),
   jsonCount: document.getElementById("jsonCount"),
+
+  // opt-in tracking
+  trackToggle: document.getElementById("trackToggle"),
+  trackStatus: document.getElementById("trackStatus"),
 };
 
 let selectedTabId = null;
+let currentTrackingEnabled = null; // null=unknown, true/false=known
 const MIN_LIVE_MS = 500;
 let liveShownAt = 0;
 let flipTimer = null;
+let lastFocusedWindowId = null;
 
-function clearFlipTimer() { if (flipTimer) { clearTimeout(flipTimer); flipTimer = null; } }
+/* ---------------- Utility: stable sets with optional flash ---------------- */
 
-/* ---------------- Flash helpers ---------------- */
+function setText(el, text) {
+  const next = text == null ? "" : String(text);
+  if ((el.textContent ?? "") === next) return false;
+  el.textContent = next;
+  return true;
+}
 
-/** Set textContent and add a subtle yellow fade if it changed */
-function setTextWithFlash(el, nextText) {
-  const prev = el.textContent ?? "";
-  const text = nextText == null ? "" : String(nextText);
-  if (prev === text) return;
-  el.textContent = text;
+function setTextWithFlash(el, text, { flash = true } = {}) {
+  const changed = setText(el, text);
+  if (!changed || !flash) return;
   el.classList.remove("flash");
   void el.offsetWidth; // restart animation
   el.classList.add("flash");
 }
-function multiFlash(pairs) { for (const [el, val] of pairs) setTextWithFlash(el, val); }
+
+function multiSet(pairs, { flash = true } = {}) {
+  for (const [el, val] of pairs) setTextWithFlash(el, val, { flash });
+}
 
 /* ---------------- Badge helpers ---------------- */
 
@@ -53,20 +64,28 @@ function showLiveBadge() {
   fields.liveBadge.classList.remove("synced");
   fields.liveBadge.hidden = false;
   liveShownAt = Date.now();
-  clearFlipTimer();
+  if (flipTimer) { clearTimeout(flipTimer); flipTimer = null; }
 }
 function showSyncedBadge() {
   fields.liveBadge.textContent = "Synced";
   fields.liveBadge.classList.add("synced");
   fields.liveBadge.hidden = false;
-  clearFlipTimer();
+  if (flipTimer) { clearTimeout(flipTimer); flipTimer = null; }
 }
 
-/* ---------------- Rendering ---------------- */
+/* ---------------- Renderers ---------------- */
 
 function renderCounters(counts) {
   const { totals = {}, dims = {} } = counts || {};
-  multiFlash([
+  // If tracking is off, show dashes but don't flash
+  if (currentTrackingEnabled === false) {
+    multiSet([
+      [fields.all, "—"], [fields.full, "—"], [fields.spa, "—"],
+      [fields.path, "—"], [fields.query, "—"], [fields.frag, "—"],
+    ], { flash: false });
+    return;
+  }
+  multiSet([
     [fields.all, totals.all ?? 0],
     [fields.full, totals.full ?? 0],
     [fields.spa, totals.spa ?? 0],
@@ -76,32 +95,68 @@ function renderCounters(counts) {
   ]);
 }
 
-function renderMetadata({ url, origin, counts, ids }) {
+function renderMetadataTrackingOn({ url, origin, counts, ids }) {
+  // origin + core URL + core count
   setTextWithFlash(fields.coreOrigin, origin || "(none)");
   setTextWithFlash(fields.coreUrl, url || "(none)");
+  if (fields.coreCount) setTextWithFlash(fields.coreCount, counts?.totals?.all ?? 0);
 
-  // Core count is equal to Total
-  setTextWithFlash(fields.coreCount, counts?.totals?.all ?? 0);
-
+  // derived IDs
   const canonical = ids?.canonical || "(none)";
   const ogUrl     = ids?.ogUrl     || "(none)";
   const jsonId    = ids?.jsonLdId  || "(none)";
   const idCounts  = counts?.ids || {};
 
-  multiFlash([
+  multiSet([
     [fields.canonUrl, canonical],
     [fields.ogUrl, ogUrl],
     [fields.jsonId, jsonId],
     [fields.canonCount, idCounts.canonical ?? 0],
-    [fields.ogCount, idCounts.ogUrl ?? 0],
-    [fields.jsonCount, idCounts.jsonLdId ?? 0],
+    [fields.ogCount,    idCounts.ogUrl ?? 0],
+    [fields.jsonCount,  idCounts.jsonLdId ?? 0],
   ]);
 }
 
-function renderSnapshot(snap) {
-  renderCounters(snap.counts);
-  renderMetadata(snap);
+function renderMetadataTrackingOff(origin) {
+  // Always show origin, no flash
+  setTextWithFlash(fields.coreOrigin, origin || "(none)", { flash: false });
+
+  // Everything else is suppressed; write placeholders with no flash
+  const off = "(tracking off)";
+  const dash = "—";
+  multiSet([
+    [fields.coreUrl, off],
+    [fields.canonUrl, off],
+    [fields.ogUrl, off],
+    [fields.jsonId, off],
+  ], { flash: false });
+
+  if (fields.coreCount) setTextWithFlash(fields.coreCount, dash, { flash: false });
+  multiSet([
+    [fields.canonCount, dash],
+    [fields.ogCount, dash],
+    [fields.jsonCount, dash],
+  ], { flash: false });
 }
+
+function renderSnapshot(snap) {
+  // Tracking toggle state
+  currentTrackingEnabled = !!snap.trackingEnabled;
+  fields.trackToggle && (fields.trackToggle.checked = currentTrackingEnabled);
+  fields.trackStatus && setText(fields.trackStatus, currentTrackingEnabled ? "On" : "Off");
+
+  // Counters first (they know how to handle tracking off)
+  renderCounters(snap.counts);
+
+  // Metadata based on tracking
+  if (currentTrackingEnabled) {
+    renderMetadataTrackingOn(snap);
+  } else {
+    renderMetadataTrackingOff(snap.origin);
+  }
+}
+
+/* ---------------- Live fetch for active tab ---------------- */
 
 function formatTitle(tab) {
   const t = (tab.title || "").trim();
@@ -109,53 +164,77 @@ function formatTitle(tab) {
   const u = tab.url || "";
   try {
     const p = new URL(u);
-    if (p.protocol === "about:" || p.protocol === "moz-extension:" || p.protocol === "chrome:") {
+    if (["about:", "moz-extension:", "chrome:"].includes(p.protocol)) {
       return `${p.protocol}${p.pathname || ""}`;
     }
     return p.host || u;
   } catch { return u || "(current tab)"; }
 }
 
-async function showLiveForActiveTab() {
+async function showLiveForActiveTab({ optimistic = true } = {}) {
   const [active] = await browser.tabs.query({ active: true, currentWindow: true });
   if (!active) return;
   selectedTabId = active.id;
 
-  setTextWithFlash(fields.tabTitle, formatTitle(active));
-  setTextWithFlash(fields.coreUrl, active.url || "(none)");
-  try {
-    setTextWithFlash(
-      fields.coreOrigin,
-      active.url && active.url.startsWith("http") ? new URL(active.url).origin : "(none)"
-    );
-  } catch { setTextWithFlash(fields.coreOrigin, "(none)"); }
+  // Title always safe to set
+  setTextWithFlash(fields.tabTitle, formatTitle(active), { flash: false });
 
+  // Always set Origin immediately so user knows context
+  let origin = "(none)";
+  try {
+    origin = (active.url && active.url.startsWith("http")) ? new URL(active.url).origin : "(none)";
+  } catch {}
+  setTextWithFlash(fields.coreOrigin, origin, { flash: false });
+
+  // If we don't yet know trackingEnabled for this tab, DO NOT write URLs.
+  // Show stable placeholders to avoid flicker.
+  if (currentTrackingEnabled === null || optimistic === false) {
+    multiSet([
+      [fields.coreUrl, "(loading…)"],
+      [fields.canonUrl, "(loading…)"],
+      [fields.ogUrl, "(loading…)"],
+      [fields.jsonId, "(loading…)"],
+    ], { flash: false });
+
+    const dash = "—";
+    if (fields.coreCount) setTextWithFlash(fields.coreCount, dash, { flash: false });
+    multiSet([[fields.canonCount, dash], [fields.ogCount, dash], [fields.jsonCount, dash]], { flash: false });
+  }
+
+  // Ask background for the canonical snapshot; badge lives as before
   showLiveBadge();
   browser.runtime.sendMessage({ type: "get-state", tabId: selectedTabId }).catch(() => {});
 }
 
 /* ---------------- Events ---------------- */
 
-fields.resetBtn.addEventListener("click", async () => {
+fields.resetBtn?.addEventListener("click", async () => {
   const tabId = selectedTabId;
   if (!Number.isFinite(tabId)) return;
 
-  // Optimistic zeroing (counters)
-  multiFlash([
+  // Optimistic clear — but do not flash
+  multiSet([
     [fields.all, 0], [fields.full, 0], [fields.spa, 0],
     [fields.path, 0], [fields.query, 0], [fields.frag, 0],
-  ]);
-  // Optimistic metadata reset (keep core URL/origin from live tab, clear derived IDs)
-  multiFlash([
-    [fields.canonUrl, "(none)"], [fields.ogUrl, "(none)"], [fields.jsonId, "(none)"],
-    [fields.canonCount, 0], [fields.ogCount, 0], [fields.jsonCount, 0],
-  ]);
+  ], { flash: false });
+
+  // Clear derived IDs immediately; core URLs will be re-written by snapshot
+  const dash = "—";
+  multiSet([
+    [fields.canonUrl, "(loading…)"],
+    [fields.ogUrl, "(loading…)"],
+    [fields.jsonId, "(loading…)"],
+    [fields.canonCount, 0],
+    [fields.ogCount, 0],
+    [fields.jsonCount, 0],
+  ], { flash: false });
+  if (fields.coreCount) setTextWithFlash(fields.coreCount, 0, { flash: false });
 
   try { await browser.runtime.sendMessage({ type: "manual-reset", tabId }); } catch {}
   browser.runtime.sendMessage({ type: "get-state", tabId }).catch(() => {});
 });
 
-// Render and flip to Synced after a minimum Live duration
+// Background broadcasts: render and flip to Synced after a minimum Live duration
 browser.runtime.onMessage.addListener((msg) => {
   if (msg?.type !== "url-change-state" || msg.tabId !== selectedTabId) return;
 
@@ -163,32 +242,74 @@ browser.runtime.onMessage.addListener((msg) => {
   const doRender = () => { renderSnapshot(msg); showSyncedBadge(); };
 
   if (elapsed >= MIN_LIVE_MS) doRender();
-  else { clearFlipTimer(); flipTimer = setTimeout(doRender, MIN_LIVE_MS - elapsed); }
+  else {
+    if (flipTimer) clearTimeout(flipTimer);
+    flipTimer = setTimeout(doRender, MIN_LIVE_MS - elapsed);
+  }
 });
 
 // Follow active tab within the current window
-browser.tabs.onActivated.addListener(async () => { await showLiveForActiveTab(); });
+browser.tabs.onActivated.addListener(async () => {
+  // Unknown tracking state until snapshot arrives for the newly activated tab
+  currentTrackingEnabled = null;
+  await showLiveForActiveTab({ optimistic: false });
+});
 
-// Keep title/url fresh and re-sync on change
+// Guarded window focus change: only react if active tab changed or tracking unknown
+browser.windows.onFocusChanged.addListener(async (windowId) => {
+  if (windowId === browser.windows.WINDOW_ID_NONE) return; // sidebar focus, etc.
+  if (lastFocusedWindowId === windowId && currentTrackingEnabled !== null) return;
+  lastFocusedWindowId = windowId;
+
+  // Snap to the active tab in the focused window
+  const [active] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!active) return;
+  if (selectedTabId === active.id && currentTrackingEnabled !== null) return;
+
+  currentTrackingEnabled = null;
+  await showLiveForActiveTab({ optimistic: false });
+});
+
+// Keep title fresh and re-sync on URL change for the active tab
 browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (tabId !== selectedTabId) return;
 
-  if (changeInfo.title) setTextWithFlash(fields.tabTitle, formatTitle(tab));
+  if (changeInfo.title) setText(fields.tabTitle, formatTitle(tab));
+
   if (changeInfo.url) {
-    setTextWithFlash(fields.coreUrl, changeInfo.url || "(none)");
+    // Always update origin non-flashing
     try {
-      setTextWithFlash(fields.coreOrigin,
-        changeInfo.url && changeInfo.url.startsWith("http") ? new URL(changeInfo.url).origin : "(none)"
-      );
-    } catch { setTextWithFlash(fields.coreOrigin, "(none)"); }
+      const o = changeInfo.url.startsWith("http") ? new URL(changeInfo.url).origin : "(none)";
+      setTextWithFlash(fields.coreOrigin, o, { flash: false });
+    } catch { setTextWithFlash(fields.coreOrigin, "(none)", { flash: false }); }
+
+    // Only write the Core URL immediately if we already know tracking is ON.
+    if (currentTrackingEnabled === true) {
+      setTextWithFlash(fields.coreUrl, changeInfo.url);
+    } else {
+      setTextWithFlash(fields.coreUrl, "(loading…)", { flash: false });
+    }
+
     showLiveBadge();
     browser.runtime.sendMessage({ type: "get-state", tabId }).catch(() => {});
   }
 });
 
-// Keep in step with window focus
-browser.windows.onFocusChanged.addListener(async () => { await showLiveForActiveTab(); });
+/* Tracking toggle */
+fields.trackToggle?.addEventListener("change", () => {
+  const originText = fields.coreOrigin.textContent || "";
+  const origin = originText.startsWith("http") ? originText : "";
+  if (!origin) return;
+  const enabled = !!fields.trackToggle.checked;
+  // Immediately reflect status text without flash; values will follow via snapshot
+  fields.trackStatus && setText(fields.trackStatus, enabled ? "On" : "Off");
+  currentTrackingEnabled = null; // force placeholders until snapshot reflects new state
+  browser.runtime.sendMessage({ type: "set-tracking", origin, enabled }).catch(() => {});
+  browser.runtime.sendMessage({ type: "get-state" }).catch(() => {});
+});
 
 // Initial boot
-(async function init() { await showLiveForActiveTab(); })();
+(async function init() {
+  await showLiveForActiveTab({ optimistic: false });
+})();
 

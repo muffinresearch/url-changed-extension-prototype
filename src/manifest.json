@@ -5,7 +5,8 @@
   "description": "Stubs UI changes whenever a tab URL changes, including SPA navigations.",
   "permissions": [
     "tabs",
-    "webNavigation"
+    "webNavigation",
+    "storage"
   ],
   "host_permissions": ["<all_urls>"],
   "background": {

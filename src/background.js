@@ -1,6 +1,6 @@
 // background.js — MV3 compatible (Firefox: background.scripts; Chromium: service_worker)
 
-// Polyfill for both Firefox and Chromium
+// Cross-browser API
 const browserAPI = (typeof browser !== "undefined")
   ? browser
   : {
@@ -9,6 +9,7 @@ const browserAPI = (typeof browser !== "undefined")
       runtime: chrome.runtime,
       tabs: chrome.tabs,
       webNavigation: chrome.webNavigation,
+      storage: chrome.storage,
     };
 
 /* --------------------------- State & helpers --------------------------- */
@@ -20,7 +21,7 @@ const CORE_PROTOCOLS = new Set(["http:", "https:", "file:"]);
  *   lastUrl: string|null,
  *   origin: string|null,
  *   hasBaseline: boolean,
- *   suppressNextIdIncrements: boolean, // one-shot: baseline metadata shouldn't increment
+ *   suppressNextIdIncrements: boolean,
  *   counts: {
  *     totals: { all, full, spa },
  *     dims:   { path, query, fragment },
@@ -31,6 +32,21 @@ const CORE_PROTOCOLS = new Set(["http:", "https:", "file:"]);
  */
 const tabState = new Map();
 
+/** Persisted allow-list: { [origin: string]: true } */
+let allowlist = Object.create(null);
+
+async function loadAllowlist() {
+  try {
+    const { trackingAllowlist } = await browserAPI.storage?.local?.get?.("trackingAllowlist") ?? {};
+    allowlist = (trackingAllowlist && typeof trackingAllowlist === "object") ? trackingAllowlist : Object.create(null);
+  } catch {
+    allowlist = Object.create(null);
+  }
+}
+async function saveAllowlist() {
+  try { await browserAPI.storage?.local?.set?.({ trackingAllowlist: allowlist }); } catch {}
+}
+
 function newCounts() {
   return {
     totals: { all: 0, full: 0, spa: 0 },
@@ -38,7 +54,6 @@ function newCounts() {
     ids:    { canonical: 0, ogUrl: 0, jsonLdId: 0 },
   };
 }
-
 function getState(tabId) {
   if (!tabState.has(tabId)) {
     tabState.set(tabId, {
@@ -68,6 +83,10 @@ function diffComponents(prev, next) {
   };
 }
 
+function isTrackingEnabledForOrigin(origin) {
+  return !!(origin && allowlist[origin]);
+}
+
 /* ---------------------- Snapshots, badge, broadcast ---------------------- */
 
 async function snapshotForWithLiveUrl(tabId) {
@@ -84,7 +103,9 @@ async function snapshotForWithLiveUrl(tabId) {
       }
     } catch {}
   }
-  return { tabId, url, origin, counts: s.counts, ids: s.ids };
+
+  const trackingEnabled = isTrackingEnabledForOrigin(origin);
+  return { tabId, url, origin, counts: s.counts, ids: s.ids, trackingEnabled };
 }
 
 async function broadcast(tabId) {
@@ -94,7 +115,7 @@ async function broadcast(tabId) {
 
 async function updateBadge(tabId) {
   const snap = await snapshotForWithLiveUrl(tabId);
-  const txt = snap.counts.totals.all ? String(snap.counts.totals.all) : "";
+  const txt = (snap.trackingEnabled && snap.counts.totals.all) ? String(snap.counts.totals.all) : "";
   try {
     await browserAPI.action.setBadgeText({ tabId, text: txt });
     await browserAPI.action.setBadgeBackgroundColor?.({ tabId, color: "#444" });
@@ -119,15 +140,15 @@ function debouncedRefreshPageIds(tabId, delay = 150) {
 
 /**
  * Fold in canonical / og:url / JSON-LD.
- * - Always update stored values.
- * - Increment counters only if we have a baseline and not in suppression mode.
- * - Return { idsChanged, countsIncremented } so callers can decide to rebroadcast.
+ * - Always store values.
+ * - Increment counters only if: tracking enabled for origin, have baseline, and not in suppression mode.
  */
 function integratePageIds(tabId, incoming) {
   const s = getState(tabId);
   const suppress = s.suppressNextIdIncrements;
   const { canonical = "", ogUrl = "", jsonLdId = "" } = incoming || {};
 
+  const trackingEnabled = isTrackingEnabledForOrigin(s.origin);
   let idsChanged = false;
   let countsIncremented = false;
 
@@ -137,7 +158,7 @@ function integratePageIds(tabId, incoming) {
     const changed = prev !== val;
     if (changed) idsChanged = true;
     s.ids[key] = val;
-    if (changed && s.hasBaseline && !suppress) {
+    if (changed && trackingEnabled && s.hasBaseline && !suppress) {
       s.counts.ids[key] += 1;
       countsIncremented = true;
     }
@@ -147,11 +168,43 @@ function integratePageIds(tabId, incoming) {
   consider("ogUrl", ogUrl);
   consider("jsonLdId", jsonLdId);
 
-  // Clear one-shot suppression after integrating baseline values
   if (suppress) s.suppressNextIdIncrements = false;
 
   tabState.set(tabId, s);
   return { idsChanged, countsIncremented };
+}
+
+/* --------------------------- Baseline & reset --------------------------- */
+
+/** Baseline a tab to its current live URL; zero counts; do not increment first metadata integration. */
+async function baselineTab(tabId) {
+  const s = getState(tabId);
+
+  // Get live URL
+  let liveUrl = "";
+  try { const tab = await browserAPI.tabs.get(tabId); liveUrl = tab?.url || ""; } catch {}
+  if (!liveUrl || !isCoreProtocol(liveUrl)) {
+    // Clear state if we can't baseline
+    s.lastUrl = null; s.origin = null; s.hasBaseline = false;
+    s.counts = newCounts(); s.ids = { canonical: "", ogUrl: "", jsonLdId: "" };
+    tabState.set(tabId, s);
+    await broadcast(tabId);
+    await updateBadge(tabId);
+    return;
+  }
+
+  const u = new URL(liveUrl);
+  s.lastUrl = liveUrl;
+  s.origin = `${u.protocol}//${u.host}`;
+  s.hasBaseline = true;
+  s.counts = newCounts();
+  s.ids = { canonical: "", ogUrl: "", jsonLdId: "" };
+  s.suppressNextIdIncrements = true; // first metadata integration is baseline (no increments)
+  tabState.set(tabId, s);
+
+  await broadcast(tabId);
+  await updateBadge(tabId);
+  debouncedRefreshPageIds(tabId, 0);
 }
 
 /* --------------------------- Core URL change flow --------------------------- */
@@ -160,68 +213,59 @@ async function handleUrlChange(tabId, url, source /* 'full' | 'spa' */) {
   if (!isCoreProtocol(url)) return;
 
   const s = getState(tabId);
-  const prevUrl = s.lastUrl;
-  const prevHasBaseline = s.hasBaseline;
-
   const next = toURL(url);
   if (!next) return;
 
-  // De-dupe if we already have a baseline and the URL hasn't changed
-  if (prevHasBaseline && prevUrl === url) return;
+  const origin = originOf(next);
+  const trackingEnabled = isTrackingEnabledForOrigin(origin);
 
-  // If no baseline yet, set it now and DO NOT increment any counters.
-  if (!prevHasBaseline) {
+  // If tracking is disabled for this origin, keep a minimal baseline (for UI), but do not count or probe.
+  if (!trackingEnabled) {
     s.lastUrl = url;
-    s.origin = originOf(next);
-    s.hasBaseline = true;
-    s.suppressNextIdIncrements = true; // baseline metadata shouldn't increment
+    s.origin = origin;
+    s.hasBaseline = true; // so snapshot shows URL; but counts stay at zero
     tabState.set(tabId, s);
-
     await broadcast(tabId);
     await updateBadge(tabId);
-    // Baseline metadata (no increments due to suppression)
-    debouncedRefreshPageIds(tabId, 0);
     return;
   }
 
-  // We have a baseline; compute diffs against it
+  const prevUrl = s.lastUrl;
+  const prevHasBaseline = s.hasBaseline;
+
+  // If no baseline yet (e.g., fresh focus, restart), establish it and stop.
+  if (!prevHasBaseline) {
+    await baselineTab(tabId);
+    return;
+  }
+
+  // De-dupe
+  if (prevUrl === url) return;
+
+  // Compute diffs and handle origin change
   const prev = toURL(prevUrl);
   const diffs = diffComponents(prev, next);
 
-  // If origin changed, reset and set NEW baseline to the new URL, no increments
   if (prev && diffs.origin) {
-    s.counts = newCounts();
-    s.ids = { canonical: "", ogUrl: "", jsonLdId: "" };
-    s.lastUrl = url;
-    s.origin = originOf(next);
-    s.hasBaseline = true;
-    s.suppressNextIdIncrements = true; // suppress metadata bump for this new baseline
-    tabState.set(tabId, s);
-
-    await broadcast(tabId);
-    await updateBadge(tabId);
-    debouncedRefreshPageIds(tabId, 0); // baseline metadata for new origin
+    // Reset on origin change, then baseline to the new origin
+    await baselineTab(tabId); // baselineTab reads live URL; here it's equal to `url`
     return;
   }
 
-  // Normal, within-origin change: increment totals and per-dimension buckets
+  // Normal within-origin change: count + advance baseline
   s.counts.totals.all += 1;
-  if (source === "spa") s.counts.totals.spa += 1;
-  else                  s.counts.totals.full += 1;
-
+  if (source === "spa") s.counts.totals.spa += 1; else s.counts.totals.full += 1;
   if (diffs.path)     s.counts.dims.path     += 1;
   if (diffs.query)    s.counts.dims.query    += 1;
   if (diffs.fragment) s.counts.dims.fragment += 1;
 
-  // Advance baseline
   s.lastUrl = url;
+  s.origin  = origin;
   tabState.set(tabId, s);
 
   await broadcast(tabId);
   await updateBadge(tabId);
-
-  // Re-probe metadata; if values change now, id counters will increment (no suppression)
-  debouncedRefreshPageIds(tabId);
+  debouncedRefreshPageIds(tabId); // will increment ID counts if values change
 }
 
 /* ------------------------------ Event wiring ------------------------------ */
@@ -231,7 +275,7 @@ browserAPI.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.url) {
     handleUrlChange(tabId, changeInfo.url, "full");
   }
-  // Also probe metadata when a page finishes loading, even if URL didn't change
+  // Probe metadata when a page finishes loading (even if URL didn't change)
   if (changeInfo.status === "complete") {
     debouncedRefreshPageIds(tabId);
   }
@@ -255,10 +299,32 @@ browserAPI.tabs.onRemoved.addListener((tabId) => {
   probeTimers.delete(tabId);
 });
 
-// Keep badge in step and ensure metadata populates when a tab is focused
+// Auto-reset (baseline) when a tab becomes active
 browserAPI.tabs.onActivated.addListener(async ({ tabId }) => {
-  await updateBadge(tabId);
-  debouncedRefreshPageIds(tabId); // ensure canonical/OG/JSON-LD are populated on focus
+  // Baseline only if tracking is enabled for this tab's origin; otherwise just broadcast "disabled"
+  try {
+    const tab = await browserAPI.tabs.get(tabId);
+    const url = tab?.url || "";
+    const origin = url && isCoreProtocol(url) ? `${new URL(url).protocol}//${new URL(url).host}` : null;
+
+    if (origin && isTrackingEnabledForOrigin(origin)) {
+      await baselineTab(tabId);
+    } else {
+      // Ensure UI knows tracking is disabled; set minimal state
+      const s = getState(tabId);
+      s.lastUrl = url || null;
+      s.origin = origin || null;
+      s.hasBaseline = !!url;
+      tabState.set(tabId, s);
+      await broadcast(tabId);
+      await updateBadge(tabId);
+    }
+  } catch {
+    await updateBadge(tabId);
+  }
+
+  // Always ensure metadata is populated (will be ignored if tracking disabled)
+  debouncedRefreshPageIds(tabId);
 });
 
 /* ---------------------- Messages (sidebar / popup / page) ---------------------- */
@@ -266,8 +332,7 @@ browserAPI.tabs.onActivated.addListener(async ({ tabId }) => {
 browserAPI.runtime.onMessage.addListener((msg, sender) => {
   if (!msg || !msg.type) return;
 
-  // Snapshot request — include live URL if we don't have one yet.
-  // Also kick off a metadata probe if we haven't stored any IDs for this tab.
+  // Snapshot request — also kick a probe if no IDs yet.
   if (msg.type === "get-state") {
     (async () => {
       let tabId = Number.isFinite(msg.tabId) ? msg.tabId : sender?.tab?.id;
@@ -277,9 +342,7 @@ browserAPI.runtime.onMessage.addListener((msg, sender) => {
       }
       if (Number.isFinite(tabId)) {
         const s = getState(tabId);
-        if (!s.ids.canonical && !s.ids.ogUrl && !s.ids.jsonLdId) {
-          debouncedRefreshPageIds(tabId);
-        }
+        if (!s.ids.canonical && !s.ids.ogUrl && !s.ids.jsonLdId) debouncedRefreshPageIds(tabId);
         const snap = await snapshotForWithLiveUrl(tabId);
         await browserAPI.runtime.sendMessage({ type: "url-change-state", ...snap }).catch(() => {});
       }
@@ -287,10 +350,7 @@ browserAPI.runtime.onMessage.addListener((msg, sender) => {
     return;
   }
 
-  // Manual reset:
-  // - zero counters/ids
-  // - baseline immediately to the current live URL (if available)
-  // - re-probe metadata as baseline (no increments)
+  // Manual reset: force baseline (even if tracking currently disabled, we'll still show the snapshot)
   if (msg.type === "manual-reset") {
     (async () => {
       let tabId = Number.isFinite(msg.tabId) ? msg.tabId : sender?.tab?.id;
@@ -300,35 +360,38 @@ browserAPI.runtime.onMessage.addListener((msg, sender) => {
       }
       if (!Number.isFinite(tabId)) return;
 
-      const s = getState(tabId);
-      s.counts = newCounts();
-      s.ids = { canonical: "", ogUrl: "", jsonLdId: "" };
-      s.hasBaseline = false;
-      s.suppressNextIdIncrements = true; // baseline metadata suppression
+      await baselineTab(tabId);
+    })();
+    return;
+  }
 
-      try {
-        const tab = await browserAPI.tabs.get(tabId);
-        if (tab?.url && isCoreProtocol(tab.url)) {
-          const u = new URL(tab.url);
-          s.lastUrl = tab.url;
-          s.origin = `${u.protocol}//${u.host}`;
-          s.hasBaseline = true;
-        } else {
-          s.lastUrl = null;
-          s.origin = null;
-          s.hasBaseline = false;
+  // Toggle tracking for an origin { origin, enabled }
+  if (msg.type === "set-tracking") {
+    (async () => {
+      const { origin, enabled } = msg;
+      if (!origin) return;
+      if (enabled) allowlist[origin] = true;
+      else delete allowlist[origin];
+      await saveAllowlist();
+
+      // If the sender tab matches this origin, re-baseline or broadcast disabled
+      const tabId = sender?.tab?.id;
+      if (Number.isFinite(tabId)) {
+        const s = getState(tabId);
+        const sameOrigin = s.origin === origin;
+        if (sameOrigin) {
+          if (enabled) {
+            await baselineTab(tabId);
+          } else {
+            // Clear counts and ids for visual clarity
+            s.counts = newCounts();
+            s.ids = { canonical: "", ogUrl: "", jsonLdId: "" };
+            tabState.set(tabId, s);
+            await broadcast(tabId);
+            await updateBadge(tabId);
+          }
         }
-      } catch {
-        s.lastUrl = null; s.origin = null; s.hasBaseline = false;
       }
-
-      tabState.set(tabId, s);
-
-      await broadcast(tabId);
-      await updateBadge(tabId);
-
-      // Re-probe metadata to capture baseline values (will not increment due to suppression)
-      debouncedRefreshPageIds(tabId, 0);
     })();
     return;
   }
@@ -337,15 +400,20 @@ browserAPI.runtime.onMessage.addListener((msg, sender) => {
   if (msg.type === "page-ids") {
     const tabId = sender?.tab?.id;
     if (!Number.isFinite(tabId)) return;
+
     const { idsChanged } = integratePageIds(tabId, msg);
     // Rebroadcast if metadata values changed (even if counters didn’t increment)
     if (idsChanged) {
-      (async () => {
-        await broadcast(tabId);
-        await updateBadge(tabId);
-      })();
+      (async () => { await broadcast(tabId); await updateBadge(tabId); })();
     }
     return;
   }
 });
+
+/* ---------------------------- Bootstrapping ---------------------------- */
+
+(async function init() {
+  await loadAllowlist();
+  // No need to rebuild tabState: we baseline on focus and handle counts thereafter.
+})();
 
