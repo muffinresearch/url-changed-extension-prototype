@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "URL Change UI Stub",
+  "version": "0.1.0",
+  "description": "Stubs UI changes whenever a tab URL changes, including SPA navigations.",
+  "permissions": [
+    "tabs",
+    "webNavigation"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "scripts": ["background.js"],
+    "type": "module"
+  },
+
+  "action": {
+    "default_title": "URL Change Counters",
+    "default_popup": "popup.html"
+  },
+
+  "sidebar_action": {
+    "default_title": "URL Change Counters",
+    "default_panel": "sidebar.html"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["ids.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

@@ -1,0 +1,105 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 10px; font: 12px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+
+  /* Header */
+  .head { display: flex; align-items: center; gap: 8px; }
+  .title { font-weight: 600; font-size: 12px; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: #e8eefc; color: #2a55a5; border: 1px solid #c6d5fb; }
+  .badge.synced { background: #eef7ee; color: #2d6b2f; border-color: #cfe6cf; }
+  button { padding: 2px 6px; font-size: 11px; border-radius: 6px; border: 1px solid #d0d3d8; background: var(--btn-bg, #fff); cursor: pointer; }
+
+  /* Counters */
+  .grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 6px; margin-top: 8px; }
+  .k { display: grid; gap: 2px; padding: 8px; border-radius: 8px; background: rgba(0,0,0,.06); }
+  .k h4 { margin: 0; font-size: 11px; font-weight: 600; opacity: .9; }
+  .k .v { font-size: 14px; font-weight: 700; }
+
+  /* Metadata section */
+  .section { margin-top: 10px; }
+  .section h3 { margin: 0 0 6px 0; font-size: 11px; font-weight: 700; opacity: .7; text-transform: uppercase; letter-spacing: .02em; }
+  .kv { padding: 8px; border-radius: 8px; background: rgba(0,0,0,.03); }
+  .kv + .kv { margin-top: 6px; }
+  .kv-head { display: flex; align-items: center; gap: 8px; }
+  .klabel { font-size: 11px; font-weight: 700; }
+  .count { margin-left: auto; font-size: 11px; padding: 1px 6px; border-radius: 999px; background: rgba(0,0,0,.08); }
+  .kvalue { margin-top: 6px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+
+  /* Subtle yellow flash-on-change */
+  .flash { animation: flashFade 700ms ease-out; }
+  @keyframes flashFade {
+    from { background-color: rgba(255, 235, 59, 0.35); } /* yellow 600 @ 35% */
+    to   { background-color: transparent; }
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .k { background: rgba(255,255,255,.06); }
+    .kv { background: rgba(255,255,255,.06); }
+    button { --btn-bg: #1a1a1a; border-color: #3a3a3a; }
+  }
+</style>
+
+<div class="head">
+  <div id="tabTitle" class="title">(current tab)</div>
+  <span id="liveBadge" class="badge" hidden>Live</span>
+  <button id="reset">Reset</button>
+</div>
+
+<!-- Totals and dimensions -->
+<div class="grid">
+  <div class="k"><h4>Total</h4><div class="v" id="all">0</div></div>
+  <div class="k"><h4>Full</h4><div class="v" id="full">0</div></div>
+  <div class="k"><h4>History API</h4><div class="v" id="spa">0</div></div>
+  <div class="k"><h4>Path</h4><div class="v" id="path">0</div></div>
+  <div class="k"><h4>Query</h4><div class="v" id="query">0</div></div>
+  <div class="k"><h4>Fragment</h4><div class="v" id="frag">0</div></div>
+</div>
+
+<!-- Metadata (Origin first, each value on its own line) -->
+<div class="section">
+  <h3>Document identifiers</h3>
+
+  <div class="kv">
+    <div class="kv-head">
+      <div class="klabel">Origin</div>
+      <!-- no badge here -->
+    </div>
+    <div id="coreOrigin" class="kvalue">(none)</div>
+  </div>
+
+  <div class="kv">
+    <div class="kv-head">
+      <div class="klabel">Core URL</div>
+      <div id="coreCount" class="count">0</div>
+    </div>
+    <div id="coreUrl" class="kvalue">(none)</div>
+  </div>
+
+  <div class="kv">
+    <div class="kv-head">
+      <div class="klabel">Canonical</div>
+      <div id="canonCount" class="count">0</div>
+    </div>
+    <div id="canonUrl" class="kvalue">(none)</div>
+  </div>
+
+  <div class="kv">
+    <div class="kv-head">
+      <div class="klabel">OG URL</div>
+      <div id="ogCount" class="count">0</div>
+    </div>
+    <div id="ogUrl" class="kvalue">(none)</div>
+  </div>
+
+  <div class="kv">
+    <div class="kv-head">
+      <div class="klabel">JSON-LD @id / url</div>
+      <div id="jsonCount" class="count">0</div>
+    </div>
+    <div id="jsonId" class="kvalue">(none)</div>
+  </div>
+</div>
+
+<script src="sidebar.js" type="module"></script>
