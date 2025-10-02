@@ -86,7 +86,7 @@ The UI lives in a **sidebar** with a responsive **Live → Synced** status so it
 * **Sender checks**:
   * Sidebar → background messages are accepted only from our own extension pages.
   * Content → background messages are accepted only from injected tabs **with** current host permission and the **correct nonce**.
-* **XSS-safe UI**: Sidebar uses `textContent` (never `innerHTML`); long strings are truncated visually and shown fully on hover via `title` attributes.
+* **textContent over innerHTML**: Sidebar uses `textContent` (never `innerHTML`); long strings are truncated visually and shown fully on hover via `title` attributes.
 
 ---
 
