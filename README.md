@@ -1,4 +1,4 @@
-# Web Extension: URL Change Counters Sidebar Extension
+# Web Extension: URL Changed Extension Prototype
 
 ## Important Note
 
