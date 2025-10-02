@@ -1,11 +1,11 @@
-// sidebar.js — no flicker when tracking is off; restrained flashing; focus-change guarded
+// sidebar.js — requests host permission on "On", revokes it on "Off".
+// Also handles unsupported pages, yellow flash, and tracking-aware rendering.
 
 const fields = {
   tabTitle: document.getElementById("tabTitle"),
   liveBadge: document.getElementById("liveBadge"),
   resetBtn: document.getElementById("reset"),
 
-  // counters
   all: document.getElementById("all"),
   full: document.getElementById("full"),
   spa: document.getElementById("spa"),
@@ -13,10 +13,9 @@ const fields = {
   query: document.getElementById("query"),
   frag: document.getElementById("frag"),
 
-  // metadata (origin first)
   coreOrigin: document.getElementById("coreOrigin"),
   coreUrl: document.getElementById("coreUrl"),
-  coreCount: document.getElementById("coreCount"), // if present
+  coreCount: document.getElementById("coreCount"),
   canonUrl: document.getElementById("canonUrl"),
   canonCount: document.getElementById("canonCount"),
   ogUrl: document.getElementById("ogUrl"),
@@ -24,19 +23,19 @@ const fields = {
   jsonId: document.getElementById("jsonId"),
   jsonCount: document.getElementById("jsonCount"),
 
-  // opt-in tracking
   trackToggle: document.getElementById("trackToggle"),
   trackStatus: document.getElementById("trackStatus"),
 };
 
 let selectedTabId = null;
-let currentTrackingEnabled = null; // null=unknown, true/false=known
+let currentTrackingEnabled = null; // null=unknown
 const MIN_LIVE_MS = 500;
 let liveShownAt = 0;
 let flipTimer = null;
 let lastFocusedWindowId = null;
+let lastKnownProtocol = null;
 
-/* ---------------- Utility: stable sets with optional flash ---------------- */
+/* ---------------- Utilities ---------------- */
 
 function setText(el, text) {
   const next = text == null ? "" : String(text);
@@ -44,20 +43,22 @@ function setText(el, text) {
   el.textContent = next;
   return true;
 }
-
 function setTextWithFlash(el, text, { flash = true } = {}) {
   const changed = setText(el, text);
   if (!changed || !flash) return;
   el.classList.remove("flash");
-  void el.offsetWidth; // restart animation
+  void el.offsetWidth;
   el.classList.add("flash");
 }
-
 function multiSet(pairs, { flash = true } = {}) {
   for (const [el, val] of pairs) setTextWithFlash(el, val, { flash });
 }
+function isHttpOriginText(s) { return typeof s === "string" && /^https?:\/\/[^/]+$/.test(s); }
+function protocolOf(url) { try { return new URL(url).protocol; } catch { return ""; } }
+function isSupportedProtocol(proto) { return proto === "http:" || proto === "https:"; }
+function patternForOriginText(originText) { try { const u = new URL(originText); return `${u.protocol}//${u.host}/*`; } catch { return null; } }
 
-/* ---------------- Badge helpers ---------------- */
+/* ---------------- Badge ---------------- */
 
 function showLiveBadge() {
   fields.liveBadge.textContent = "Live";
@@ -72,17 +73,42 @@ function showSyncedBadge() {
   fields.liveBadge.hidden = false;
   if (flipTimer) { clearTimeout(flipTimer); flipTimer = null; }
 }
+function hideBadge() {
+  fields.liveBadge.hidden = true;
+  if (flipTimer) { clearTimeout(flipTimer); flipTimer = null; }
+}
 
-/* ---------------- Renderers ---------------- */
+/* ---------------- Unsupported-page mode ---------------- */
+
+function applyUnavailableUI(originText, reason = "(unavailable here)") {
+  if (fields.trackToggle) { fields.trackToggle.disabled = true; fields.trackToggle.checked = false; }
+  if (fields.trackStatus) setText(fields.trackStatus, "Off");
+  if (fields.resetBtn) fields.resetBtn.disabled = true;
+
+  setTextWithFlash(fields.coreOrigin, originText || "(none)", { flash: false });
+
+  const dash = "—";
+  multiSet([[fields.all, dash], [fields.full, dash], [fields.spa, dash], [fields.path, dash], [fields.query, dash], [fields.frag, dash]], { flash: false });
+
+  const unavailable = reason;
+  multiSet([[fields.coreUrl, unavailable], [fields.canonUrl, unavailable], [fields.ogUrl, unavailable], [fields.jsonId, unavailable]], { flash: false });
+
+  if (fields.coreCount) setTextWithFlash(fields.coreCount, dash, { flash: false });
+  multiSet([[fields.canonCount, dash], [fields.ogCount, dash], [fields.jsonCount, dash]], { flash: false });
+
+  hideBadge();
+}
+
+function clearUnavailableUI() {
+  if (fields.resetBtn) fields.resetBtn.disabled = false;
+}
+
+/* ---------------- Rendering (supported pages) ---------------- */
 
 function renderCounters(counts) {
   const { totals = {}, dims = {} } = counts || {};
-  // If tracking is off, show dashes but don't flash
   if (currentTrackingEnabled === false) {
-    multiSet([
-      [fields.all, "—"], [fields.full, "—"], [fields.spa, "—"],
-      [fields.path, "—"], [fields.query, "—"], [fields.frag, "—"],
-    ], { flash: false });
+    multiSet([[fields.all, "—"], [fields.full, "—"], [fields.spa, "—"], [fields.path, "—"], [fields.query, "—"], [fields.frag, "—"]], { flash: false });
     return;
   }
   multiSet([
@@ -96,67 +122,43 @@ function renderCounters(counts) {
 }
 
 function renderMetadataTrackingOn({ url, origin, counts, ids }) {
-  // origin + core URL + core count
   setTextWithFlash(fields.coreOrigin, origin || "(none)");
   setTextWithFlash(fields.coreUrl, url || "(none)");
   if (fields.coreCount) setTextWithFlash(fields.coreCount, counts?.totals?.all ?? 0);
 
-  // derived IDs
   const canonical = ids?.canonical || "(none)";
   const ogUrl     = ids?.ogUrl     || "(none)";
   const jsonId    = ids?.jsonLdId  || "(none)";
   const idCounts  = counts?.ids || {};
 
-  multiSet([
-    [fields.canonUrl, canonical],
-    [fields.ogUrl, ogUrl],
-    [fields.jsonId, jsonId],
-    [fields.canonCount, idCounts.canonical ?? 0],
-    [fields.ogCount,    idCounts.ogUrl ?? 0],
-    [fields.jsonCount,  idCounts.jsonLdId ?? 0],
-  ]);
+  multiSet([[fields.canonUrl, canonical], [fields.ogUrl, ogUrl], [fields.jsonId, jsonId]]);
+  multiSet([[fields.canonCount, idCounts.canonical ?? 0], [fields.ogCount, idCounts.ogUrl ?? 0], [fields.jsonCount, idCounts.jsonLdId ?? 0]]);
 }
 
 function renderMetadataTrackingOff(origin) {
-  // Always show origin, no flash
   setTextWithFlash(fields.coreOrigin, origin || "(none)", { flash: false });
-
-  // Everything else is suppressed; write placeholders with no flash
   const off = "(tracking off)";
   const dash = "—";
-  multiSet([
-    [fields.coreUrl, off],
-    [fields.canonUrl, off],
-    [fields.ogUrl, off],
-    [fields.jsonId, off],
-  ], { flash: false });
-
+  multiSet([[fields.coreUrl, off], [fields.canonUrl, off], [fields.ogUrl, off], [fields.jsonId, off]], { flash: false });
   if (fields.coreCount) setTextWithFlash(fields.coreCount, dash, { flash: false });
-  multiSet([
-    [fields.canonCount, dash],
-    [fields.ogCount, dash],
-    [fields.jsonCount, dash],
-  ], { flash: false });
+  multiSet([[fields.canonCount, dash], [fields.ogCount, dash], [fields.jsonCount, dash]], { flash: false });
 }
 
 function renderSnapshot(snap) {
-  // Tracking toggle state
   currentTrackingEnabled = !!snap.trackingEnabled;
-  fields.trackToggle && (fields.trackToggle.checked = currentTrackingEnabled);
-  fields.trackStatus && setText(fields.trackStatus, currentTrackingEnabled ? "On" : "Off");
 
-  // Counters first (they know how to handle tracking off)
+  const originTxt = snap.origin || "";
+  const isHttp = isHttpOriginText(originTxt);
+  if (fields.trackToggle) fields.trackToggle.disabled = !isHttp;
+  if (fields.trackToggle) fields.trackToggle.checked = currentTrackingEnabled;
+  if (fields.trackStatus) setText(fields.trackStatus, currentTrackingEnabled ? "On" : "Off");
+
   renderCounters(snap.counts);
-
-  // Metadata based on tracking
-  if (currentTrackingEnabled) {
-    renderMetadataTrackingOn(snap);
-  } else {
-    renderMetadataTrackingOff(snap.origin);
-  }
+  if (currentTrackingEnabled) renderMetadataTrackingOn(snap);
+  else renderMetadataTrackingOff(snap.origin);
 }
 
-/* ---------------- Live fetch for active tab ---------------- */
+/* ---------------- Title + live fetch ---------------- */
 
 function formatTitle(tab) {
   const t = (tab.title || "").trim();
@@ -171,37 +173,37 @@ function formatTitle(tab) {
   } catch { return u || "(current tab)"; }
 }
 
-async function showLiveForActiveTab({ optimistic = true } = {}) {
+async function showLiveForActiveTab({ optimistic = false } = {}) {
   const [active] = await browser.tabs.query({ active: true, currentWindow: true });
   if (!active) return;
   selectedTabId = active.id;
 
-  // Title always safe to set
   setTextWithFlash(fields.tabTitle, formatTitle(active), { flash: false });
 
-  // Always set Origin immediately so user knows context
   let origin = "(none)";
+  let proto = "";
   try {
-    origin = (active.url && active.url.startsWith("http")) ? new URL(active.url).origin : "(none)";
+    proto = protocolOf(active.url);
+    origin = (active.url && isSupportedProtocol(proto)) ? new URL(active.url).origin : "(none)";
   } catch {}
+
+  lastKnownProtocol = proto;
   setTextWithFlash(fields.coreOrigin, origin, { flash: false });
 
-  // If we don't yet know trackingEnabled for this tab, DO NOT write URLs.
-  // Show stable placeholders to avoid flicker.
-  if (currentTrackingEnabled === null || optimistic === false) {
-    multiSet([
-      [fields.coreUrl, "(loading…)"],
-      [fields.canonUrl, "(loading…)"],
-      [fields.ogUrl, "(loading…)"],
-      [fields.jsonId, "(loading…)"],
-    ], { flash: false });
+  if (!isSupportedProtocol(proto)) {
+    applyUnavailableUI(origin, "(unavailable here)");
+    return; // do not ask background for state
+  }
 
+  clearUnavailableUI();
+
+  if (currentTrackingEnabled === null || optimistic === false) {
+    multiSet([[fields.coreUrl, "(loading…)"], [fields.canonUrl, "(loading…)"], [fields.ogUrl, "(loading…)"], [fields.jsonId, "(loading…)"]], { flash: false });
     const dash = "—";
     if (fields.coreCount) setTextWithFlash(fields.coreCount, dash, { flash: false });
     multiSet([[fields.canonCount, dash], [fields.ogCount, dash], [fields.jsonCount, dash]], { flash: false });
   }
 
-  // Ask background for the canonical snapshot; badge lives as before
   showLiveBadge();
   browser.runtime.sendMessage({ type: "get-state", tabId: selectedTabId }).catch(() => {});
 }
@@ -209,34 +211,38 @@ async function showLiveForActiveTab({ optimistic = true } = {}) {
 /* ---------------- Events ---------------- */
 
 fields.resetBtn?.addEventListener("click", async () => {
+  if (fields.resetBtn.disabled) return;
   const tabId = selectedTabId;
   if (!Number.isFinite(tabId)) return;
 
-  // Optimistic clear — but do not flash
-  multiSet([
-    [fields.all, 0], [fields.full, 0], [fields.spa, 0],
-    [fields.path, 0], [fields.query, 0], [fields.frag, 0],
-  ], { flash: false });
-
-  // Clear derived IDs immediately; core URLs will be re-written by snapshot
-  const dash = "—";
-  multiSet([
-    [fields.canonUrl, "(loading…)"],
-    [fields.ogUrl, "(loading…)"],
-    [fields.jsonId, "(loading…)"],
-    [fields.canonCount, 0],
-    [fields.ogCount, 0],
-    [fields.jsonCount, 0],
-  ], { flash: false });
+  multiSet([[fields.all, 0], [fields.full, 0], [fields.spa, 0], [fields.path, 0], [fields.query, 0], [fields.frag, 0]], { flash: false });
+  multiSet([[fields.canonUrl, "(loading…)"], [fields.ogUrl, "(loading…)"], [fields.jsonId, "(loading…)"], [fields.canonCount, 0], [fields.ogCount, 0], [fields.jsonCount, 0]], { flash: false });
   if (fields.coreCount) setTextWithFlash(fields.coreCount, 0, { flash: false });
 
   try { await browser.runtime.sendMessage({ type: "manual-reset", tabId }); } catch {}
   browser.runtime.sendMessage({ type: "get-state", tabId }).catch(() => {});
 });
 
-// Background broadcasts: render and flip to Synced after a minimum Live duration
+// Handle background → UI messages
 browser.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === "set-tracking-result") {
+    const originText = fields.coreOrigin.textContent || "";
+    if (msg.origin === originText) {
+      const ok = !!msg.enabled;
+      if (fields.trackToggle) fields.trackToggle.checked = ok;
+      if (fields.trackStatus) setText(fields.trackStatus, ok ? "On" : "Off");
+      browser.runtime.sendMessage({ type: "get-state" }).catch(() => {});
+    }
+    return;
+  }
+
   if (msg?.type !== "url-change-state" || msg.tabId !== selectedTabId) return;
+
+  // If we somehow receive a snapshot for an unsupported page, enforce unavailable UI
+  if (!isSupportedProtocol(lastKnownProtocol)) {
+    applyUnavailableUI(fields.coreOrigin.textContent || "(none)");
+    return;
+  }
 
   const elapsed = Date.now() - liveShownAt;
   const doRender = () => { renderSnapshot(msg); showSyncedBadge(); };
@@ -248,20 +254,16 @@ browser.runtime.onMessage.addListener((msg) => {
   }
 });
 
-// Follow active tab within the current window
+// Follow active tab and window focus
 browser.tabs.onActivated.addListener(async () => {
-  // Unknown tracking state until snapshot arrives for the newly activated tab
   currentTrackingEnabled = null;
   await showLiveForActiveTab({ optimistic: false });
 });
-
-// Guarded window focus change: only react if active tab changed or tracking unknown
 browser.windows.onFocusChanged.addListener(async (windowId) => {
-  if (windowId === browser.windows.WINDOW_ID_NONE) return; // sidebar focus, etc.
+  if (windowId === browser.windows.WINDOW_ID_NONE) return;
   if (lastFocusedWindowId === windowId && currentTrackingEnabled !== null) return;
   lastFocusedWindowId = windowId;
 
-  // Snap to the active tab in the focused window
   const [active] = await browser.tabs.query({ active: true, currentWindow: true });
   if (!active) return;
   if (selectedTabId === active.id && currentTrackingEnabled !== null) return;
@@ -270,45 +272,88 @@ browser.windows.onFocusChanged.addListener(async (windowId) => {
   await showLiveForActiveTab({ optimistic: false });
 });
 
-// Keep title fresh and re-sync on URL change for the active tab
+// Keep title + origin fresh and re-sync on URL change for the active tab
 browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (tabId !== selectedTabId) return;
 
   if (changeInfo.title) setText(fields.tabTitle, formatTitle(tab));
 
   if (changeInfo.url) {
-    // Always update origin non-flashing
-    try {
-      const o = changeInfo.url.startsWith("http") ? new URL(changeInfo.url).origin : "(none)";
-      setTextWithFlash(fields.coreOrigin, o, { flash: false });
-    } catch { setTextWithFlash(fields.coreOrigin, "(none)", { flash: false }); }
+    const proto = protocolOf(changeInfo.url);
+    lastKnownProtocol = proto;
+    const isSupported = isSupportedProtocol(proto);
 
-    // Only write the Core URL immediately if we already know tracking is ON.
-    if (currentTrackingEnabled === true) {
-      setTextWithFlash(fields.coreUrl, changeInfo.url);
+    if (isSupported) {
+      try {
+        const o = new URL(changeInfo.url).origin;
+        setTextWithFlash(fields.coreOrigin, o, { flash: false });
+      } catch { setTextWithFlash(fields.coreOrigin, "(none)", { flash: false }); }
+
+      if (currentTrackingEnabled === true) setTextWithFlash(fields.coreUrl, changeInfo.url);
+      else setTextWithFlash(fields.coreUrl, "(loading…)", { flash: false });
+
+      showLiveBadge();
+      browser.runtime.sendMessage({ type: "get-state", tabId }).catch(() => {});
     } else {
-      setTextWithFlash(fields.coreUrl, "(loading…)", { flash: false });
+      const originText = "(none)";
+      setTextWithFlash(fields.coreOrigin, originText, { flash: false });
+      applyUnavailableUI(originText, "(unavailable here)");
     }
-
-    showLiveBadge();
-    browser.runtime.sendMessage({ type: "get-state", tabId }).catch(() => {});
   }
 });
 
-/* Tracking toggle */
-fields.trackToggle?.addEventListener("change", () => {
-  const originText = fields.coreOrigin.textContent || "";
-  const origin = originText.startsWith("http") ? originText : "";
-  if (!origin) return;
-  const enabled = !!fields.trackToggle.checked;
-  // Immediately reflect status text without flash; values will follow via snapshot
-  fields.trackStatus && setText(fields.trackStatus, enabled ? "On" : "Off");
-  currentTrackingEnabled = null; // force placeholders until snapshot reflects new state
-  browser.runtime.sendMessage({ type: "set-tracking", origin, enabled }).catch(() => {});
+/* ---- Tracking toggle: request host permission on "On", revoke on "Off" ---- */
+
+fields.trackToggle?.addEventListener("change", async () => {
+  const origin = fields.coreOrigin.textContent || "";
+  if (!isHttpOriginText(origin)) {
+    fields.trackToggle.checked = false;
+    if (fields.trackStatus) setText(fields.trackStatus, "Off");
+    return;
+  }
+
+  const enabling = !!fields.trackToggle.checked;
+
+  if (enabling) {
+    // Request host permission (door-hanger)
+    const pattern = patternForOriginText(origin);
+    if (!pattern) return;
+    try {
+      const granted = await browser.permissions.request({ origins: [pattern] });
+      if (!granted) {
+        fields.trackToggle.checked = false;
+        if (fields.trackStatus) setText(fields.trackStatus, "Off");
+        browser.runtime.sendMessage({ type: "set-tracking", origin, enabled: false }).catch(() => {});
+        return;
+      }
+    } catch {
+      fields.trackToggle.checked = false;
+      if (fields.trackStatus) setText(fields.trackStatus, "Off");
+      return;
+    }
+    if (fields.trackStatus) setText(fields.trackStatus, "On");
+    currentTrackingEnabled = null;
+    browser.runtime.sendMessage({ type: "set-tracking", origin, enabled: true }).catch(() => {});
+    browser.runtime.sendMessage({ type: "get-state" }).catch(() => {});
+    return;
+  }
+
+  // Disabling: revoke host permission and tell background to disable
+  try {
+    const pattern = patternForOriginText(origin);
+    if (pattern) {
+      await browser.permissions.remove({ origins: [pattern] }).catch(() => {});
+    }
+  } catch { /* ignore */ }
+
+  if (fields.trackStatus) setText(fields.trackStatus, "Off");
+  currentTrackingEnabled = null;
+  browser.runtime.sendMessage({ type: "set-tracking", origin, enabled: false }).catch(() => {});
   browser.runtime.sendMessage({ type: "get-state" }).catch(() => {});
 });
 
-// Initial boot
+/* -------------------------------- Boot -------------------------------- */
+
 (async function init() {
   await showLiveForActiveTab({ optimistic: false });
 })();

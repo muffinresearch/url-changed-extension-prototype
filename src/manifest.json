@@ -6,29 +6,18 @@
   "permissions": [
     "tabs",
     "webNavigation",
-    "storage"
+    "storage",
+    "scripting"
   ],
-  "host_permissions": ["<all_urls>"],
+  "optional_host_permissions": ["<all_urls>"],
+
   "background": {
     "scripts": ["background.js"],
     "type": "module"
   },
 
-  "action": {
-    "default_title": "URL Change Counters",
-    "default_popup": "popup.html"
-  },
-
   "sidebar_action": {
     "default_title": "URL Change Counters",
     "default_panel": "sidebar.html"
-  },
-
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["ids.js"],
-      "run_at": "document_idle"
-    }
-  ]
+  }
 }
