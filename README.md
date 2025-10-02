@@ -1,10 +1,10 @@
 # Web Extension: URL Changed Extension Prototype
 
-## Important Note
+## Important Note 💣
 
 This quick prototype was built by ChatGPT, with all files authored by ChatGPT, and refined based on directions.
 
-As a result, it's worth noting that this code may well contain bugs or oversights so please use at your own risk, and it should be considered **experimental**.
+⚠️ As a result, it's worth noting that this code may well contain bugs or oversights so ***please use at your own risk***, and it should be considered **experimental**.
 
 
 ## Overview
